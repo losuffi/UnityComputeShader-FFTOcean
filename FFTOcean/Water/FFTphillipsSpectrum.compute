@@ -1,0 +1,152 @@
+#pragma kernel phillipsSpectrum
+#pragma kernel LyfSpectrum
+#define PI		3.14159265358f
+#define PI2		6.28318530717f
+#define HPI		1.57079632679f
+#define INVPI2	0.63661977236f
+#define FAC     0.70710678118f
+uint _Size;
+float domainSize;
+float4 _Wind;
+float _G;
+float _Length;
+float _A;
+RWTexture2D<float4> phillipsSpectrumResH0K;
+RWTexture2D<float2> IscopeH0K;
+Texture2D<float> noise_R1;
+Texture2D<float> noise_I1;
+Texture2D<float> noise_R2;
+Texture2D<float> noise_I2;
+float4 gaussRND(float2 uv)
+{
+    float noise00=clamp(noise_R1[uv],0.001,1);
+    float noise01=clamp(noise_I1[uv],0.001,1);
+    float noise02=clamp(noise_R2[uv],0.001,1);
+    float noise03=clamp(noise_I2[uv],0.001,1);
+
+    float u0=PI2*noise00;
+    float v0=sqrt(-2.0*log(noise01));
+    float u1=PI2*noise02;
+    float v1=sqrt(-2.0*log(noise03));
+    float4 rnd=float4(v0*cos(u0),v0*sin(u0),v1*cos(u1),v1*sin(u1));
+    return rnd;
+}
+uint _rngState;
+uint Rand()
+{
+    _rngState ^= (_rngState << 13);
+	_rngState ^= (_rngState >> 17);
+	_rngState ^= (_rngState << 5);
+	return _rngState;
+}
+float RandFloat()
+{
+    return Rand()/4294967296.0f;
+}
+float RandGauss()
+{
+    float u1=RandFloat();
+    float u2=RandFloat();
+    if(u1<1e-6f)
+        u1=1e-6f;
+    return sqrt(-2.0*log(u1))*cos(PI2*u2);
+}
+uint HASH(uint seed)
+{
+    seed = (seed ^ 61) ^ (seed >> 16);
+	seed *= 9;
+	seed = seed ^ (seed >> 4);
+	seed *= 0x27d4eb2d;
+	seed = seed ^ (seed >> 15);
+	return seed;
+}
+float PosCosSquaredDirectionalSpreading(float w, float theta, float kMag, float dTheta)
+{
+	if (theta > -HPI && theta < HPI)
+	{
+		float ct = cos(theta);
+		return INVPI2 * (ct * ct);
+	}
+	else
+	{
+		return 0.0f;
+	}
+}
+inline float activation(float input)
+{
+    return 1/(1+exp(-input));
+}
+[numthreads(32,32,1)]
+void phillipsSpectrum(uint2 id:SV_DispatchThreadID)
+{
+    int2 center=_Size.xx/2;
+    int2 coord=id.xy-center;
+    _rngState=HASH(id.y*_Size+id.x);
+    float2 k=PI2*coord/domainSize;
+    float klength=length(k);
+    if(klength<0.0001) klength=0.0001;  
+    float klength2=klength*klength;
+    float w=sqrt(abs(_G*klength));
+    float dwdk=_G/(2*w);
+    float B=_G/length(_Wind.xy);
+    float temp=_G/pow(w,5);
+    float s=(0.01*_G*temp)*exp(-B*pow(1/w,4));
+    float dk=PI2/domainSize;
+    float thetaPos=atan2(-k.y,k.x);
+    float thetaNeg=atan2(k.y,-k.x);
+    float dTheta=abs(atan2(dk,klength));
+    float sp=s;
+    float sn=s;
+    sp*=PosCosSquaredDirectionalSpreading(w,thetaPos,klength,dTheta);
+    sn*=PosCosSquaredDirectionalSpreading(w,thetaNeg,klength,dTheta);
+    sp*=(dk*dk)*dwdk/klength;
+    sn*=(dk*dk)*dwdk/klength;
+    float ap=RandGauss()*sqrt(abs(sp)*2.0);
+    float an=RandGauss()*sqrt(abs(sn)*2.0);
+
+    float rA=RandFloat()*PI2;
+    float rb=RandFloat()*PI2;
+    float2 randA=float2(cos(rA),-sin(rA));
+    float2 randB=float2(cos(rb),-sin(rb));
+
+    phillipsSpectrumResH0K[id]=float4(ap*randA,an*randB);
+}
+float2 Spectrum(int2 id)
+{
+    int2 coord=id-_Size.xx/2;
+    float2 k=coord*PI2/domainSize;
+    float klength=length(k);
+    if(klength<0.000001) klength=0.000001; 
+    float klength2=klength*klength;
+    float klength4=klength2*klength2;
+    float kdotw= dot(normalize(k+0.001*_Wind.xy),normalize(_Wind.xy));
+    float kdotw2=kdotw*kdotw;
+    float wlength=length(_Wind.xy);
+    float L=wlength*wlength/_G;
+    float L2=L*L;
+    float damping=0.001;
+    float l2=L2*damping*damping;
+    float pk= _A*exp(-1.0f/(klength2*L2))/klength4*kdotw2*exp(-klength2*l2);
+    pk=sqrt(pk)*FAC;
+    return float2(pk*RandGauss(),pk*RandGauss());
+    // float _exp=exp(-1/(klength2*L*L));
+    // float kw=dot(normalize(k+0.01*_Wind.xy),normalize(_Wind.xy));
+    // float nkw=dot(normalize(-k+0.01*_Wind.xy),normalize(_Wind.xy));
+    // float pk=(_A*_exp*kw*kw)/(klength2*klength2);
+    // float npk=(_A*_exp*nkw*nkw)/(klength2*klength2);
+    // pk=abs(sqrt(pk)*FAC);
+    // npk=abs(sqrt(npk)*FAC);
+    // return float4(pk*RandGauss(),pk*RandGauss(),npk*RandGauss(),-npk*RandGauss());
+}
+[numthreads(32,32,1)]
+void LyfSpectrum(int2 id:SV_DispatchThreadID)
+{
+    _rngState=HASH(id.y*_Size+id.x);
+    float2 h0k=Spectrum(id);
+    float2 temp=Spectrum(-id);
+    float2 h0k_conj=float2(temp.x,-temp.y);
+    //float2 fem=normalize(k+0.01*_Wind.xy);
+    // res.xy= float2(res.y*(fem.x+fem.y),res.x*(fem.x+fem.y));
+    // res.zw= float2(res.w*(fem.x+fem.y),res.z*(fem.x+fem.y));
+    phillipsSpectrumResH0K[id]=float4(h0k,h0k_conj);
+}

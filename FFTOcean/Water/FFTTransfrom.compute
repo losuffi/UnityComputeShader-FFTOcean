@@ -1,0 +1,228 @@
+#define PI		3.14159265358f
+#define PI2		6.28318530717f
+
+
+#pragma kernel FFT SIZE=32  CHANNEL=x TX=32 TY=1 Hori=1
+#pragma kernel FFT SIZE=32  CHANNEL=y TX=1 TY=32 Hori=0
+#pragma kernel FFT SIZE=256  CHANNEL=x TX=256 TY=1 Hori=1
+#pragma kernel FFT SIZE=256  CHANNEL=y TX=1 TY=256 Hori=0
+#pragma kernel FFT SIZE=512  CHANNEL=x TX=512 TY=1 Hori=1
+#pragma kernel FFT SIZE=512  CHANNEL=y TX=1 TY=512 Hori=0
+#pragma kernel FFT SIZE=1024  CHANNEL=x TX=1024 TY=1 Hori=1
+#pragma kernel FFT SIZE=1024  CHANNEL=y TX=1 TY=1024 Hori=0
+#pragma kernel Lyfhkt SIZE=512  CHANNEL=y TX=1 TY=512 Hori=1
+#pragma kernel CMDisp SIZE=512  CHANNEL=y TX=1 TY=512 Hori=0
+#pragma kernel CMNorm SIZE=512  CHANNEL=y TX=1 TY=512 Hori=1
+#pragma kernel FFT_Debug SIZE=256  CHANNEL=x TX=256 TY=1 Hori=1
+#pragma kernel FFT_Debug SIZE=256  CHANNEL=y TX=1 TY=256 Hori=0
+
+RWTexture2D<float4> hkt_y;
+RWTexture2D<float4> hkt_x;
+RWTexture2D<float4> hkt_z;
+RWTexture2D<float4> hkt_nx;
+RWTexture2D<float4> hkt_nz;
+int _Size;
+float _G;
+float _T;
+float _A;
+float domainSize;
+Texture2D<float4> h0k;
+float2 Cmul(float2 lhs,float2 rhs)
+{
+    float2 res;
+    res.x=lhs.x*rhs.x-lhs.y*rhs.y;
+    res.y=lhs.x*rhs.y+lhs.y*rhs.x;
+    return res;
+}
+float2 Cadd(float2 lhs,float2 rhs)
+{
+    float2 res;
+    res.x=lhs.x+rhs.x;
+    res.y=lhs.y+rhs.y;
+    return res;
+}
+float2 Cinv(float2 input)
+{
+    return float2(input.x,-input.y);
+}
+float2 Cabs(float2 input)
+{
+    return float2(abs(input.x),abs(input.y));
+}
+
+[numthreads(32,32,1)]
+void CShkt(uint2 id: SV_DispatchThreadID)
+{
+    int2 center=_Size.xx/2;
+    int2 coord=id.xy-center;
+    float2 k=PI2*coord/domainSize;
+    float klength=length(k);
+    float w=sqrt(abs(_G*klength))*_A;
+    float dwdk=_G/(2*w);
+    float sw,cw;
+    sincos(w*_T,sw,cw);
+    float2 fwd=float2(cw,-sw);
+    float2 bkwd=float2(cw,sw);
+    float4 h=h0k[id];
+    float2 dy=Cmul(h.xy,fwd)+Cmul(h.zw,bkwd);
+    float2 dx=float2(-dy.y*k.x,dy.x*k.x)/(klength+0.00001f);
+    float2 dz=float2(-dy.y*k.y,dy.x*k.y)/(klength+0.00001f);
+    hkt_y[id.xy]=float4(dy,0,1);
+    hkt_x[id.xy]=float4(dx,0,1);
+    hkt_z[id.xy]=float4(dz,0,1);
+}
+float dispersion(float kl)
+{
+    float w0=PI2/6000.0f;
+    return floor(sqrt(_G*kl)/w0)*w0;
+}
+[numthreads(32,32,1)]
+void Lyfhkt(int2 id:SV_DispatchThreadID)
+{
+    int2 coord=id-(_Size.xx>>1);
+    float2 k=coord*PI2/domainSize;
+    float kx=k.x;
+    float kz=k.y;
+    float klen=length(k);
+    klen=(1-step(0.000001,klen))*0.000001+step(0.000001,klen)*klen;
+    float2 _h0k=h0k[id].xy;
+    float2 _h0k_conj=h0k[id].zw;
+    float omegat=dispersion(klen)*_T;
+    float cos_=cos(omegat);
+    float sin_=sin(omegat);
+    float2 c0=float2(cos_,sin_);
+    float2 c1=float2(cos_,-sin_);
+    float2 dy=Cadd(Cmul(_h0k,c1),Cmul(_h0k_conj,c0));
+    float2 slopex=Cmul(dy,float2(0,kx));
+    float2 slopez=Cmul(dy,float2(0,kz));
+    float2 dx=Cmul(dy,float2(0,-kx/klen));
+    float2 dz=Cmul(dy,float2(0,-kz/klen));
+    hkt_y[id]=float4(dy,0,1);
+    hkt_x[id]=float4(dx,0,1);
+    hkt_z[id]=float4(dz,0,1);
+    hkt_nx[id]=float4(slopex,0,1);
+    hkt_nz[id]=float4(slopez,0,1);
+}
+
+RWTexture2D<float2> output;
+Texture2D<float2> Spetrum;
+groupshared float2 cacheStructer[SIZE][2];
+
+void Butterfly(uint channel, uint ns,int source)
+{
+    uint base=(channel/ns)*(ns/2);
+    uint offs=channel%(ns/2);
+
+    uint i0=base+offs;
+    uint i1=i0+SIZE/2;
+
+    float2 v0=cacheStructer[i0][source];
+    float2 v1=cacheStructer[i1][source];
+
+    float a=-PI2*float(channel)/ns;
+    float2 W=float2(cos(a),sin(a));
+
+    cacheStructer[channel][source^1]=Cadd(v0,(Cmul(W,v1)));
+
+}
+void Butterfly_debug(uint channel, uint ns,int source)
+{
+    uint base=(channel/ns)*(ns/2);
+    uint offs=channel%(ns/2);
+
+    uint i0=base+offs;
+    uint i1=i0+SIZE/2;
+
+    float2 v0=cacheStructer[i0][source];
+    float2 v1=cacheStructer[i1][source];
+
+    float a=-PI2*float(channel)/ns;
+    float2 W=float2(cos(a),sin(a));
+
+    cacheStructer[channel][source^1]=Cadd(v0,Cmul(W,v1));
+
+}
+[numthreads(TX,TY,1)]
+void FFT(uint2 id:SV_DispatchThreadID)
+{
+    uint x=id.CHANNEL;
+    #if Hori
+    cacheStructer[x][0]=Cinv(Spetrum[id]);
+    #else
+    cacheStructer[x][0]=Spetrum[id];
+    #endif
+    GroupMemoryBarrierWithGroupSync();
+    int source=0;
+    for(uint n=2;n<=SIZE;n*=2)
+    {
+        Butterfly(x,n,source);
+        source^=1;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    #if Hori
+        output[id]= cacheStructer[x][source];
+    #else
+        const float sign = ((id.x + id.y) % 2) == 1 ? -1.0f : 1.0f;
+        output[id]= sign*(cacheStructer[x][source].x);
+    #endif
+}
+RWTexture2D<float4> DispOut;
+
+Texture2D<float> dY;
+Texture2D<float> dX;
+Texture2D<float> dZ;
+Texture2D<float> dsX;
+Texture2D<float> dsZ;
+float _Lameda;
+float chopponess;
+float _normalSize;
+float3 sampleDisp(int2 uv)
+{
+    uv.x+=uv.x<0?_Size:(uv.x>=_Size?-_Size:0);
+    uv.y+=uv.y<0?_Size:(uv.y>=_Size?-_Size:0);
+    float3 res=float3(dX[uv],dY[uv],dZ[uv])*float3(_Lameda,1,_Lameda);
+    return res*chopponess;
+}
+[numthreads(32,32,1)]
+void CMDisp(int2 id:SV_DispatchThreadID)
+{
+    DispOut[id]=float4(sampleDisp(id),1);
+}
+RWTexture2D<float4> NormOut;
+[numthreads(32,32,1)]
+void CMNorm(int2 id:SV_DispatchThreadID)
+{
+    // int2 rep=id;//int2(id.x>>1,id.y>>1);
+    // float3 dispL=sampleDisp(rep-int2(1,0));
+    // float3 dispR=sampleDisp(rep+int2(1,0));
+    // float3 dispT=sampleDisp(rep-int2(0,1));
+    // float3 dispB=sampleDisp(rep+int2(0,1));
+
+    // float3 diffH=dispR-dispL;
+    // float3 diffv=dispB-dispT;
+
+    // float2 Dx=diffH.xz*_Lameda*_Size;
+    // float2 Dy=diffv.xz*_Lameda*_Size;
+    // float J=(1+Dx.x)*(1+Dy.y)-Dx.y*Dy.x;
+    // float fold=max(1-saturate(J),0);
+    // NormOut[id]=float4(-diffH.y,-diffv.y,1,fold);
+    float3 n=normalize(float3(-dsX[id]*_normalSize,-dsZ[id]*_normalSize,1));
+    NormOut[id]= float4(n,1);
+}
+RWTexture2D<float2> debugOut;
+Texture2D<float> space_d;
+[numthreads(TX,TY,1)]
+void FFT_Debug(uint2 id:SV_DispatchThreadID)
+{
+    uint x=id.CHANNEL;
+    cacheStructer[x][0]=space_d[id];
+    GroupMemoryBarrierWithGroupSync();
+    int source=0;
+    for(uint n=2;n<=SIZE;n*=2)
+    {
+        Butterfly_debug(x,n,source);
+        source^=1;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    debugOut[id]=cacheStructer[x][source];
+}

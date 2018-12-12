@@ -1,0 +1,66 @@
+#pragma kernel ComShadowMap
+#pragma kernel BlurShadowMapX
+#pragma kernel BlurShadowMapY
+Texture2D<float> inp;
+RWTexture2D<float4> shadowM;
+float Strengthess;
+[numthreads(8,8,1)]
+void ComShadowMap(uint2 id:SV_DispatchThreadID)
+{
+    float alpha=step(0.1,inp[id].r);
+    float res=(1-alpha);
+    shadowM[id]=float4(res,res,res,alpha*Strengthess);
+}
+
+Texture2D<float4> input;
+RWTexture2D<float4> shadowMap;
+int Length;
+int SCount;
+groupshared half2 cacheStructer[1024][2];
+int getIndex(int input)
+{
+    //input=input%1024;
+    int max=1024;
+    int res=clamp(input,0,max-1);
+    return res;
+}
+[numthreads(1024,1,1)]
+void BlurShadowMapX(int2 id:SV_DispatchThreadID,int2 gid:SV_GroupThreadID)
+{
+    cacheStructer[gid.x][0]=input[id].zw;
+    int source=0;
+    GroupMemoryBarrierWithGroupSync();
+    for(int i=0;i<SCount;i++)
+    {
+        cacheStructer[getIndex(gid.x) ][source^1]=cacheStructer[getIndex(gid.x)][source]*0.4026
+        +cacheStructer[getIndex (gid.x+1*Length)][source]*0.2442
+        +cacheStructer[getIndex (gid.x+2*Length)][source]*0.0545
+        +cacheStructer[getIndex (gid.x-1*Length)][source]*0.2442
+        +cacheStructer[getIndex (gid.x-2*Length)][source]*0.0545;
+        source^=1;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    half c=cacheStructer[getIndex(gid.x)][source].x;
+    half a=cacheStructer[getIndex(gid.x)][source].y;
+    shadowMap[id]=half4(c,c,c,a);
+}
+[numthreads(1,1024,1)]
+void BlurShadowMapY(int2 id:SV_DispatchThreadID,int2 gid:SV_GroupThreadID)
+{
+    cacheStructer[gid.y][0]=input[id].zw;
+    int source=0;
+    GroupMemoryBarrierWithGroupSync();
+    for(int i=0;i<SCount;i++)
+    {
+        cacheStructer[getIndex(gid.y)][source^1]=cacheStructer[getIndex(gid.y)][source]*0.4026
+        +cacheStructer[getIndex (gid.y+1*Length)][source]*0.2442
+        +cacheStructer[getIndex(gid.y+2*Length)][source]*0.0545
+        +cacheStructer[getIndex(gid.y-1*Length)][source]*0.2442
+        +cacheStructer[getIndex(gid.y-2*Length)][source]*0.0545;
+        source^=1;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    half c=cacheStructer[getIndex(gid.y)][source].x;
+    half a=cacheStructer[getIndex(gid.y)][source].y;
+    shadowMap[id]=half4(c,c,c,a);
+}
